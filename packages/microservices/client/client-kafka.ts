@@ -43,13 +43,13 @@ export class ClientKafka extends ClientProxy {
   protected client: Kafka = null;
   protected consumer: Consumer = null;
   protected producer: Producer = null;
-  protected readonly logger = new Logger(ClientKafka.name);
-  protected readonly responsePatterns: string[] = [];
+  protected logger = new Logger(ClientKafka.name);
+  protected responsePatterns: string[] = [];
   protected consumerAssignments: { [key: string]: number[] } = {};
 
-  private readonly brokers: string[];
-  private readonly clientId: string;
-  private readonly groupId: string;
+  protected brokers: string[];
+  protected clientId: string;
+  protected groupId: string;
 
   constructor(protected readonly options: KafkaOptions['options']) {
     super();
@@ -93,11 +93,18 @@ export class ClientKafka extends ClientProxy {
       return this.producer;
     }
     this.client = this.createClient();
+
+    const partitionAssigners = [
+      (
+        config: ConstructorParameters<
+          typeof KafkaRoundRobinPartitionAssigner
+        >[0],
+      ) => new KafkaRoundRobinPartitionAssigner(config),
+    ] as any[];
+
     const consumerOptions = Object.assign(
       {
-        partitionAssigners: [
-          (config: any) => new KafkaRoundRobinPartitionAssigner(config),
-        ],
+        partitionAssigners,
       },
       this.options.consumer || {},
       {
@@ -120,9 +127,11 @@ export class ClientKafka extends ClientProxy {
   }
 
   public async bindTopics(): Promise<void> {
+    const consumerSubscribeOptions = this.options.subscribe || {};
     const subscribeTo = async (responsePattern: string) =>
       this.consumer.subscribe({
         topic: responsePattern,
+        ...consumerSubscribeOptions,
       });
     await Promise.all(this.responsePatterns.map(subscribeTo));
 

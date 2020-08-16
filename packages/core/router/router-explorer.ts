@@ -1,6 +1,7 @@
 import { HttpServer } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common/enums/request-method.enum';
+import { InternalServerErrorException } from '@nestjs/common/exceptions';
 import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
 import { Type } from '@nestjs/common/interfaces/type.interface';
 import { Logger } from '@nestjs/common/services/logger.service';
@@ -9,11 +10,12 @@ import {
   isUndefined,
   validatePath,
 } from '@nestjs/common/utils/shared.utils';
+import * as pathToRegexp from 'path-to-regexp';
 import { ApplicationConfig } from '../application-config';
 import { UnknownRequestMappingException } from '../errors/exceptions/unknown-request-mapping.exception';
 import { GuardsConsumer } from '../guards/guards-consumer';
 import { GuardsContextCreator } from '../guards/guards-context-creator';
-import { createContextId } from '../helpers/context-id-factory';
+import { ContextIdFactory } from '../helpers/context-id-factory';
 import { ExecutionContextHost } from '../helpers/execution-context-host';
 import { ROUTE_MAPPED_MESSAGE } from '../helpers/messages';
 import { RouterMethodFactory } from '../helpers/router-method-factory';
@@ -71,6 +73,7 @@ export class RouterExplorer {
     module: string,
     applicationRef: T,
     basePath: string,
+    host: string,
   ) {
     const { instance } = instanceWrapper;
     const routerPaths = this.scanForPaths(instance);
@@ -80,6 +83,7 @@ export class RouterExplorer {
       instanceWrapper,
       module,
       basePath,
+      host,
     );
   }
 
@@ -101,11 +105,12 @@ export class RouterExplorer {
 
   public scanForPaths(
     instance: Controller,
-    prototype?: any,
+    prototype?: object,
   ): RoutePathProperties[] {
     const instancePrototype = isUndefined(prototype)
       ? Object.getPrototypeOf(instance)
       : prototype;
+
     return this.metadataScanner.scanFromPrototype<
       Controller,
       RoutePathProperties
@@ -116,10 +121,10 @@ export class RouterExplorer {
 
   public exploreMethodMetadata(
     instance: Controller,
-    instancePrototype: any,
+    prototype: object,
     methodName: string,
   ): RoutePathProperties {
-    const targetCallback = instancePrototype[methodName];
+    const targetCallback = prototype[methodName];
     const routePath = Reflect.getMetadata(PATH_METADATA, targetCallback);
     if (isUndefined(routePath)) {
       return null;
@@ -143,8 +148,9 @@ export class RouterExplorer {
     router: T,
     routePaths: RoutePathProperties[],
     instanceWrapper: InstanceWrapper,
-    module: string,
+    moduleKey: string,
     basePath: string,
+    host: string,
   ) {
     (routePaths || []).forEach(pathProperties => {
       const { path, requestMethod } = pathProperties;
@@ -152,13 +158,19 @@ export class RouterExplorer {
         router,
         pathProperties,
         instanceWrapper,
-        module,
+        moduleKey,
         basePath,
+        host,
       );
-      path.forEach(p =>
-        this.logger.log(ROUTE_MAPPED_MESSAGE(p, requestMethod)),
-      );
+      path.forEach(item => {
+        const pathStr = this.stripEndSlash(basePath) + this.stripEndSlash(item);
+        this.logger.log(ROUTE_MAPPED_MESSAGE(pathStr, requestMethod));
+      });
     });
+  }
+
+  public stripEndSlash(str: string) {
+    return str[str.length - 1] === '/' ? str.slice(0, str.length - 1) : str;
   }
 
   private applyCallbackToRouter<T extends HttpServer>(
@@ -167,6 +179,7 @@ export class RouterExplorer {
     instanceWrapper: InstanceWrapper,
     moduleKey: string,
     basePath: string,
+    host: string,
   ) {
     const {
       path: paths,
@@ -178,9 +191,6 @@ export class RouterExplorer {
     const routerMethod = this.routerMethodFactory
       .get(router, requestMethod)
       .bind(router);
-
-    const stripSlash = (str: string) =>
-      str[str.length - 1] === '/' ? str.slice(0, str.length - 1) : str;
 
     const isRequestScoped = !instanceWrapper.isDependencyTreeStatic();
     const proxy = isRequestScoped
@@ -199,17 +209,48 @@ export class RouterExplorer {
           requestMethod,
         );
 
+    const hostHandler = this.applyHostFilter(host, proxy);
     paths.forEach(path => {
-      const fullPath = stripSlash(basePath) + path;
-      routerMethod(stripSlash(fullPath) || '/', proxy);
+      const fullPath = this.stripEndSlash(basePath) + path;
+      routerMethod(this.stripEndSlash(fullPath) || '/', hostHandler);
     });
+  }
+
+  private applyHostFilter(host: string, handler: Function) {
+    if (!host) {
+      return handler;
+    }
+
+    const httpAdapterRef = this.container.getHttpAdapterRef();
+    const keys = [];
+    const re = pathToRegexp(host, keys);
+
+    return <TRequest extends Record<string, any> = any, TResponse = any>(
+      req: TRequest,
+      res: TResponse,
+      next: () => void,
+    ) => {
+      (req as Record<string, any>).hosts = {};
+      const hostname = httpAdapterRef.getRequestHostname(req) || '';
+      const match = hostname.match(re);
+      if (match) {
+        keys.forEach((key, i) => (req.hosts[key.name] = match[i + 1]));
+        return handler(req, res, next);
+      }
+      if (!next) {
+        throw new InternalServerErrorException(
+          `HTTP adapter does not support filtering on host: "${host}"`,
+        );
+      }
+      return next();
+    };
   }
 
   private createCallbackProxy(
     instance: Controller,
     callback: RouterProxyCallback,
     methodName: string,
-    module: string,
+    moduleRef: string,
     requestMethod: RequestMethod,
     contextId = STATIC_CONTEXT,
     inquirerId?: string,
@@ -218,7 +259,7 @@ export class RouterExplorer {
       instance,
       callback,
       methodName,
-      module,
+      moduleRef,
       requestMethod,
       contextId,
       inquirerId,
@@ -226,7 +267,7 @@ export class RouterExplorer {
     const exceptionFilter = this.exceptionsFilter.create(
       instance,
       callback,
-      module,
+      moduleRef,
       contextId,
       inquirerId,
     );
@@ -236,24 +277,22 @@ export class RouterExplorer {
   public createRequestScopedHandler(
     instanceWrapper: InstanceWrapper,
     requestMethod: RequestMethod,
-    module: Module,
+    moduleRef: Module,
     moduleKey: string,
     methodName: string,
   ) {
     const { instance } = instanceWrapper;
-    const collection = module.controllers;
-    return async <TRequest, TResponse>(
+    const collection = moduleRef.controllers;
+    return async <TRequest extends Record<any, any>, TResponse>(
       req: TRequest,
       res: TResponse,
       next: () => void,
     ) => {
       try {
         const contextId = this.getContextId(req);
-        this.container.registerRequestProvider(req, contextId);
-
         const contextInstance = await this.injector.loadPerContext(
           instance,
-          module,
+          moduleRef,
           collection,
           contextId,
         );
@@ -284,15 +323,19 @@ export class RouterExplorer {
     };
   }
 
-  private getContextId<T extends Record<any, any> = any>(
+  private getContextId<T extends Record<any, unknown> = any>(
     request: T,
   ): ContextId {
-    if (request[REQUEST_CONTEXT_ID as any]) {
-      return request[REQUEST_CONTEXT_ID as any];
+    const contextId = ContextIdFactory.getByRequest(request);
+    if (!request[REQUEST_CONTEXT_ID as any]) {
+      Object.defineProperty(request, REQUEST_CONTEXT_ID, {
+        value: contextId,
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      });
+      this.container.registerRequestProvider(request, contextId);
     }
-    if (request.raw && request.raw[REQUEST_CONTEXT_ID]) {
-      return request.raw[REQUEST_CONTEXT_ID];
-    }
-    return createContextId();
+    return contextId;
   }
 }

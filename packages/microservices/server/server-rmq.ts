@@ -13,6 +13,7 @@ import {
   RQM_DEFAULT_URL,
 } from '../constants';
 import { RmqContext } from '../ctx-host';
+import { Transport } from '../enums';
 import { CustomTransportStrategy, RmqOptions } from '../interfaces';
 import {
   IncomingRequest,
@@ -23,6 +24,8 @@ import { Server } from './server';
 let rqmPackage: any = {};
 
 export class ServerRMQ extends Server implements CustomTransportStrategy {
+  public readonly transportId = Transport.RMQ;
+
   private server: any = null;
   private channel: any = null;
   private readonly urls: string[];
@@ -68,7 +71,7 @@ export class ServerRMQ extends Server implements CustomTransportStrategy {
 
   public async start(callback?: () => void) {
     this.server = this.createClient();
-    this.server.on(CONNECT_EVENT, (_: any) => {
+    this.server.on(CONNECT_EVENT, () => {
       if (this.channel) {
         return;
       }
@@ -79,6 +82,7 @@ export class ServerRMQ extends Server implements CustomTransportStrategy {
     });
     this.server.on(DISCONNECT_EVENT, (err: any) => {
       this.logger.error(DISCONNECTED_RMQ_MESSAGE);
+      this.logger.error(err);
     });
   }
 
@@ -106,7 +110,7 @@ export class ServerRMQ extends Server implements CustomTransportStrategy {
     message: Record<string, any>,
     channel: any,
   ): Promise<void> {
-    const { content, properties, fields } = message;
+    const { content, properties } = message;
     const rawMessage = JSON.parse(content.toString());
     const packet = this.deserializer.deserialize(rawMessage);
     const pattern = isString(packet.pattern)

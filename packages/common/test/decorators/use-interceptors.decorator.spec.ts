@@ -1,6 +1,6 @@
 import { expect } from 'chai';
-import { UseInterceptors } from '../../decorators/core/use-interceptors.decorator';
 import { INTERCEPTORS_METADATA } from '../../constants';
+import { UseInterceptors } from '../../decorators/core/use-interceptors.decorator';
 import { InvalidDecoratorItemException } from '../../utils/validate-each.util';
 
 class Interceptor {}
@@ -8,11 +8,11 @@ class Interceptor {}
 describe('@UseInterceptors', () => {
   const interceptors = [Interceptor, Interceptor];
 
-  @UseInterceptors(...(interceptors as any))
+  @UseInterceptors(...interceptors)
   class Test {}
 
   class TestWithMethod {
-    @UseInterceptors(...(interceptors as any))
+    @UseInterceptors(...interceptors)
     public static test() {}
   }
 
@@ -32,7 +32,7 @@ describe('@UseInterceptors', () => {
   it('when object is invalid should throw exception', () => {
     let error = undefined;
     try {
-      UseInterceptors('test' as any)({ name: 'target' });
+      UseInterceptors('test' as any)({ name: 'target' } as any);
     } catch (e) {
       error = e;
     }
@@ -46,7 +46,7 @@ describe('@UseInterceptors', () => {
         intercept() {
           return null;
         },
-      })({ name: 'target' });
+      })({ name: 'target' } as any);
     } catch (e) {
       error = e;
     }

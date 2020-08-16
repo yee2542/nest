@@ -19,6 +19,7 @@ import {
   isSymbol,
   isUndefined,
 } from '@nestjs/common/utils/shared.utils';
+import { iterate } from 'iterare';
 import { ApplicationConfig } from '../application-config';
 import { InvalidClassException } from '../errors/exceptions/invalid-class.exception';
 import { RuntimeException } from '../errors/exceptions/runtime.exception';
@@ -39,19 +40,19 @@ export class Module {
   private readonly _imports = new Set<Module>();
   private readonly _providers = new Map<any, InstanceWrapper<Injectable>>();
   private readonly _injectables = new Map<any, InstanceWrapper<Injectable>>();
+  private readonly _middlewares = new Map<any, InstanceWrapper<Injectable>>();
   private readonly _controllers = new Map<
     string,
     InstanceWrapper<Controller>
   >();
   private readonly _exports = new Set<string | symbol>();
-  private _distance: number = 0;
+  private _distance = 0;
 
   constructor(
     private readonly _metatype: Type<any>,
-    private readonly _scope: Type<any>[],
     private readonly container: NestContainer,
   ) {
-    this.addCoreProviders(container);
+    this.addCoreProviders();
     this._id = randomStringGenerator();
   }
 
@@ -59,12 +60,12 @@ export class Module {
     return this._id;
   }
 
-  get scope(): Type<any>[] {
-    return this._scope;
-  }
-
   get providers(): Map<any, InstanceWrapper<Injectable>> {
     return this._providers;
+  }
+
+  get middlewares(): Map<any, InstanceWrapper<Injectable>> {
+    return this._middlewares;
   }
 
   get imports(): Set<Module> {
@@ -124,7 +125,7 @@ export class Module {
     this._distance = value;
   }
 
-  public addCoreProviders(container: NestContainer) {
+  public addCoreProviders() {
     this.addModuleAsProvider();
     this.addModuleRef();
     this.addApplicationConfig();
@@ -351,6 +352,7 @@ export class Module {
         isResolved: false,
         inject: [useExisting],
         host: this,
+        isAlias: true,
       }),
     );
   }
@@ -391,15 +393,16 @@ export class Module {
       return token;
     }
     const importsArray = [...this._imports.values()];
-    const importsNames = importsArray
-      .filter(item => item)
+    const importsNames = iterate(importsArray)
+      .filter(item => !!item)
       .map(({ metatype }) => metatype)
-      .filter(metatype => metatype)
-      .map(({ name }) => name);
+      .filter(metatype => !!metatype)
+      .map(({ name }) => name)
+      .toArray();
 
-    if (!importsNames.includes(token as any)) {
+    if (!importsNames.includes(token as string)) {
       const { name } = this.metatype;
-      throw new UnknownExportException(token as any, name);
+      throw new UnknownExportException(token, name);
     }
     return token;
   }
@@ -472,7 +475,12 @@ export class Module {
     return this._providers.get(name) as InstanceWrapper<T>;
   }
 
-  public createModuleReferenceType(): any {
+  public getNonAliasProviders(): Array<[string, InstanceWrapper<Injectable>]> {
+    return [...this._providers].filter(([_, wrapper]) => !wrapper.isAlias);
+  }
+
+  public createModuleReferenceType(): Type<ModuleRef> {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return class extends ModuleRef {
       constructor() {
@@ -483,10 +491,9 @@ export class Module {
         typeOrToken: Type<TInput> | string | symbol,
         options: { strict: boolean } = { strict: true },
       ): TResult {
-        if (!(options && options.strict)) {
-          return this.find<TInput, TResult>(typeOrToken);
-        }
-        return this.findInstanceByToken<TInput, TResult>(typeOrToken, self);
+        return !(options && options.strict)
+          ? this.find<TInput, TResult>(typeOrToken)
+          : this.find<TInput, TResult>(typeOrToken, self);
       }
 
       public resolve<TInput = any, TResult = TInput>(
